@@ -244,26 +244,57 @@ class TextGenerator(Protocol):
 
 class OpenAIGenerator:
     def __init__(self, max_output_tokens: int = 300) -> None:
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("OPENAI_MODEL", "").strip()
+        api_key = (
+            os.getenv("OPENAI_API_KEY", "").strip()
+            or os.getenv("DEEPSEEK_API_KEY", "").strip()
+            or os.getenv("GEMINI_API_KEY", "").strip()
+        )
+        self.model = (
+            os.getenv("OPENAI_MODEL", "").strip()
+            or os.getenv("LLM_MODEL", "").strip()
+            or os.getenv("GEMINI_MODEL", "").strip()
+        )
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is missing from .env")
+            raise RuntimeError("API key is missing from .env")
         if not self.model:
-            raise RuntimeError("OPENAI_MODEL is missing from .env")
-        self.client = OpenAI(api_key=api_key)
+            raise RuntimeError("Model name is missing from .env")
+        
+        base_url = (
+            os.getenv("DEEPSEEK_BASE_URL", "").strip()
+            or os.getenv("OPENAI_BASE_URL", "").strip()
+        )
+        provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+        if not base_url and (provider == "gemini" or api_key.startswith("AQ.")):
+            base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+        if base_url:
+            self.client = OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            self.client = OpenAI(api_key=api_key)
+            
         self.max_output_tokens = max_output_tokens
 
     def generate(self, prompt: str) -> str:
-        response = self.client.responses.create(
-            model=self.model,
-            input=prompt,
-            temperature=0,
-            max_output_tokens=self.max_output_tokens,
-        )
-        answer = response.output_text.strip()
-        if not answer:
-            raise RuntimeError("OpenAI returned an empty answer")
-        return answer
+        last_exception = None
+        for attempt in range(3):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0,
+                    max_tokens=self.max_output_tokens,
+                )
+                answer = response.choices[0].message.content or ""
+                answer = answer.strip()
+                if answer:
+                    return answer
+            except Exception as exc:
+                last_exception = exc
+                time.sleep(2)
+
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("LLM returned an empty answer")
 
 
 @dataclass(frozen=True)
@@ -451,6 +482,7 @@ def generate_actual_answers(
             f"[{bar_after}] {index:02d}/{total:02d} | {item['id']} OK "
             f"({elapsed:.1f}s, {len(response.retrieved_chunks)} chunks)"
         )
+        time.sleep(1)
 
     return {
         "schema_version": "1.0",
